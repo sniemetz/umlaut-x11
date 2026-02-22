@@ -2,8 +2,16 @@
 
 **System-wide keyboard compose sequences for Linux**
 
+<img src="screenshots/applet_menu.png" align="right"/>
+
 Type special characters, insert text snippets, and create custom shortcuts
 without switching keyboard layouts. Works in every application.
+<img src="screenshots/config_editor.png" />
+
+<img src="screenshots/config_editor2.png" />
+
+<img src="screenshots/sequence_editor.png" />
+
 
 ## How it works
 
