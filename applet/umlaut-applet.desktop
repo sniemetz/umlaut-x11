@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Umlaut Applet
+Comment=Umlaut system tray applet
+Exec=/usr/local/bin/umlaut_applet.py --delay 5
+Icon=input-keyboard
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5

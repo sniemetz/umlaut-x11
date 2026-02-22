@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "name": "Germanic & Romance",
+  "description": "Sequences for germanic, romance language characters.",
+  "sequences": {
+    "KEY_7": {
+      "s": "ß",
+      "a": "æ",
+      "o": "œ"
+    },
+    "KEY_6": {
+      "e": "ê",
+      "a": "â",
+      "o": "ô",
+      "u": "û",
+      "i": "î"
+    },
+    "KEY_APOSTROPHE": {
+      "e": "é",
+      "a": "á",
+      "i": "í",
+      "o": "ó",
+      "u": "ú"
+    },
+    "KEY_GRAVE": {
+      "o": "ò",
+      "i": "ì",
+      "u": "ù",
+      "a": "à",
+      "e": "è"
+    },
+    "SHIFT+KEY_GRAVE": {
+      "n": "ñ",
+      "a": "ã",
+      "o": "õ"
+    },
+    "KEY_SEMICOLON": {
+      "a": "ä",
+      "o": "ö",
+      "u": "ü",
+      "e": "ë",
+      "i": "ï"
+    },
+    "SHIFT+KEY_SEMICOLON": "KEY_SEMICOLON",
+    "KEY_SLASH": {
+      "o": "ø"
+    },
+    "KEY_COMMA": {
+      "c": "ç",
+      "s": "ș",
+      "t": "ț"
+    },
+    "KEY_0": {
+      "a": "å"
+    },
+    "SHIFT+KEY_7": {
+      "a": "æ"
+    },
+    "KEY_MINUS": {
+      "d": "ð"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Umlaut Daemon - System-wide keyboard remapping service
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/umlaut-scripts/umlaut_daemon.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=no
+RestartSec=2
+TimeoutStopSec=5
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

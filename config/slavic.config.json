@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "Slavic",
+  "description": "Sequences for slavic language characters.",
+  "sequences": {
+    "KEY_COMMA": {
+      "c": "ç",
+      "s": "ș",
+      "t": "ț",
+      "a": "ą",
+      "e": "ę",
+      "l": "ľ"
+    },
+    "SHIFT+KEY_SEMICOLON": "KEY_SEMICOLON",
+    "KEY_SLASH": {
+      "p": "þ",
+      "l": "ł"
+    },
+    "KEY_SEMICOLON": {
+      "y": "ÿ"
+    },
+    "KEY_APOSTROPHE": {
+      "y": "ý",
+      "c": "ć",
+      "l": "ĺ",
+      "n": "ń",
+      "o": "ó",
+      "r": "ŕ",
+      "s": "ś",
+      "z": "ź"
+    },
+    "KEY_6": {
+      "a": "ă",
+      "c": "č",
+      "d": "ď",
+      "n": "ň",
+      "o": "ô",
+      "r": "ř",
+      "s": "š",
+      "t": "ť",
+      "z": "ž"
+    },
+    "KEY_MINUS": {
+      "d": "đ"
+    },
+    "KEY_0": {
+      "u": "ů"
+    },
+    "KEY_DOT": {
+      "z": "ż"
+    },
+    "SHIFT+KEY_6": {
+      "e": "ě"
+    }
+  }
+}

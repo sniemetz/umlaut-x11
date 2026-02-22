@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "Shortcuts",
+  "description": "Shortcuts to output predefined strings. Create your own!",
+  "sequences": {
+    "KEY_F": {
+      "e": "user@example.com",
+      "p": "555-1234",
+      "n": "John Doe",
+      "a": "123 Main St, City, State 12345"
+    }
+  }
+}

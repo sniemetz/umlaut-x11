@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "Settings",
+  "description": "App settings. Sequences in this file are ignored.",
+  "trigger_key": [
+    "KEY_LEFTALT",
+    "KEY_RIGHTALT"
+  ],
+  "passthrough_keys": [
+    "KEY_CAPSLOCK",
+    "KEY_TAB",
+    "KEY_F1",
+    "KEY_F2",
+    "KEY_F3",
+    "KEY_F4",
+    "KEY_F5",
+    "KEY_F6",
+    "KEY_F7",
+    "KEY_F8",
+    "KEY_F9",
+    "KEY_F10",
+    "KEY_F12",
+    "KEY_ESC"
+  ],
+  "settings": {
+    "timeout_ms": 1000,
+    "log_level": "INFO"
+  }
+}

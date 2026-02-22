@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""
+Umlaut Control - CLI tool for managing the umlaut daemon
+"""
+
+import sys
+import subprocess
+import argparse
+import json
+from pathlib import Path
+
+sys.path.insert(0, '/usr/local/bin/umlaut-scripts')
+try:
+    from umlaut_paths import load_settings, save_settings
+except ImportError:
+    load_settings = save_settings = None
+
+
+class UmlautControl:
+    """Control interface for umlaut daemon"""
+    
+    SERVICE_NAME  = "umlaut.service"
+    CONFIG_PATH   = str(Path.home() / '.config' / 'umlaut' / 'settings.config.json')
+    APPLET_SCRIPT = "/usr/local/bin/umlaut-scripts/umlaut_applet.py"
+    
+    def __init__(self):
+        self.using_systemd = self._check_systemd()
+    
+    def _check_systemd(self) -> bool:
+        """Check if systemd is available"""
+        try:
+            subprocess.run(['systemctl', '--version'], 
+                         capture_output=True, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+    
+    def _applet_running(self) -> bool:
+        """Check if the tray applet is already running."""
+        try:
+            result = subprocess.run(['pgrep', '-f', 'umlaut_applet'],
+                                    capture_output=True, text=True)
+            return bool(result.stdout.strip())
+        except Exception:
+            return False
+
+    def _start_applet(self):
+        """Launch the tray applet in the background if DISPLAY is available."""
+        import os
+        if not os.environ.get('DISPLAY'):
+            return  # No graphical session — skip silently
+        if self._applet_running():
+            return  # Already running
+        applet = Path(self.APPLET_SCRIPT)
+        if not applet.exists():
+            return
+        try:
+            subprocess.Popen([str(applet)],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            print("Applet started.")
+        except Exception as ex:
+            print(f"Could not start applet: {ex}")
+
+    def start(self) -> tuple:
+        """Start the daemon. Returns (returncode, error_message)."""
+        if self.using_systemd:
+            ret = self._systemctl('start')
+            if ret == 0:
+                self._start_applet()
+                return 0, ''
+            else:
+                return ret, 'Daemon failed to start — check: journalctl --user -u umlaut -n 5'
+        else:
+            print("Systemd not available. Run daemon manually:")
+            print(f"  umlaut_daemon.py {self.CONFIG_PATH}")
+            return 1, 'Systemd not available'
+
+    def stop(self) -> int:
+        """Stop the daemon"""
+        if self.using_systemd:
+            return self._systemctl('stop')
+        else:
+            print("Systemd not available. Kill process manually:")
+            print("  pkill -f umlaut_daemon")
+            return 1
+    
+    def restart(self) -> int:
+        """Restart the daemon"""
+        if self.using_systemd:
+            return self._systemctl('restart')
+        else:
+            print("Systemd not available")
+            return 1
+    
+    def reload(self) -> int:
+        """Reload configuration without restarting"""
+        if self.using_systemd:
+            return self._systemctl('reload')
+        else:
+            print("Systemd not available. Send HUP signal manually:")
+            print("  sudo pkill -HUP -f umlaut_daemon")
+            return 1
+    
+    def status(self) -> int:
+        """Show daemon status"""
+        if self.using_systemd:
+            return self._systemctl('status')
+        else:
+            # Check if process is running
+            result = subprocess.run(['pgrep', '-f', 'umlaut_daemon'],
+                                  capture_output=True)
+            if result.returncode == 0:
+                print(f"Umlaut is running (PID: {result.stdout.decode().strip()})")
+                return 0
+            else:
+                print("Umlaut is not running")
+                return 1
+    
+    def enable(self) -> int:
+        """Enable daemon to start on boot"""
+        if self.using_systemd:
+            return self._systemctl('enable')
+        else:
+            print("Systemd not available - autostart not configured")
+            return 1
+    
+    def disable(self) -> int:
+        """Disable daemon from starting on boot"""
+        if self.using_systemd:
+            return self._systemctl('disable')
+        else:
+            print("Systemd not available")
+            return 1
+    
+    def validate_config(self, config_path: str = None) -> int:
+        """Validate configuration file"""
+        if config_path is None:
+            config_path = self.CONFIG_PATH
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            # Basic validation
+            if 'trigger_key' not in config:
+                print(f"ERROR: Missing 'trigger_key' key in {config_path}")
+                return 1
+            
+            if 'sequences' not in config:
+                print(f"ERROR: Missing 'sequences' key in {config_path}")
+                return 1
+            
+            modifier = config['trigger_key']
+            if isinstance(modifier, str):
+                modifier = [modifier]
+            
+            if not isinstance(modifier, list):
+                print("ERROR: 'trigger_key' must be a string or array")
+                return 1
+            
+            sequences = config['sequences']
+            if not isinstance(sequences, dict):
+                print("ERROR: 'sequences' must be an object")
+                return 1
+            
+            print(f"Configuration valid: {config_path}")
+            print(f"  - Trigger key(s): {', '.join(modifier)}")
+            print(f"  - {len(sequences)} compose key(s)")
+            total_sequences = sum(len(targets) for targets in sequences.values())
+            print(f"  - {total_sequences} total sequence(s)")
+            
+            return 0
+            
+        except FileNotFoundError:
+            print(f"ERROR: Config file not found: {config_path}")
+            return 1
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Invalid JSON: {e}")
+            return 1
+        except Exception as e:
+            print(f"ERROR: {e}")
+            return 1
+    
+    def _systemctl(self, command: str) -> int:
+        """Execute systemctl --user command (no sudo needed)"""
+        try:
+            result = subprocess.run(['systemctl', '--user', command, self.SERVICE_NAME],
+                                  check=False)
+            return result.returncode
+        except Exception as e:
+            print(f"ERROR: {e}")
+            return 1
+    
+    # Profile management commands
+    
+    def config_list(self) -> int:
+        """List all user configs and their status"""
+        user_config_dir = Path.home() / '.config' / 'umlaut'
+        enabled = (load_settings() if load_settings else {}).get('enabled_sequences', [])
+
+        user_configs = list(sorted(user_config_dir.glob('*.config.json'))) if user_config_dir.exists() else []
+
+        if not user_configs:
+            print("No configs found")
+            print(f"User configs: {user_config_dir}")
+            return 0
+
+        print(f"Available configs ({len(user_configs)}):")
+        for config_file in user_configs:
+            config_name = config_file.stem.replace('.config', '')
+            status = "●" if config_name in enabled else "○"
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    name = config.get('name', config_name)
+                    desc = config.get('description', '')
+                    print(f"  {status} {config_name}: {name}")
+                    if desc:
+                        print(f"      {desc}")
+            except Exception:
+                print(f"  {status} {config_name}")
+
+        return 0
+    
+    def config_enable(self, *config_names: str) -> int:
+        """Enable one or more configs"""
+        if not config_names:
+            print("ERROR: No config name specified")
+            return 1
+
+        user_config_dir = Path.home() / '.config' / 'umlaut'
+        missing = [n for n in config_names
+                   if not (user_config_dir / f"{n}.config.json").exists()]
+        if missing:
+            print(f"ERROR: Config(s) not found: {', '.join(missing)}")
+            print("Run 'umlaut config-list' to see available configs")
+            return 1
+
+        s = load_settings() if load_settings else {}
+        enabled = list(s.get('enabled_sequences', []))
+
+        newly_enabled = []
+        for config_name in config_names:
+            if config_name in enabled:
+                print(f"Config '{config_name}' is already enabled")
+            else:
+                enabled.append(config_name)
+                newly_enabled.append(config_name)
+
+        if not newly_enabled:
+            return 0
+
+        if save_settings:
+            s['enabled_sequences'] = enabled
+            save_settings(s)
+        else:
+            sp = Path.home() / '.config' / 'umlaut' / 'settings.config.json'
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            s['enabled_sequences'] = enabled
+            with open(sp, 'w') as f: json.dump(s, f, indent=2)
+
+        for config_name in newly_enabled:
+            print(f"✓ Enabled config: {config_name}")
+
+        if self._is_running():
+            print("✓ Restarting daemon to apply changes...")
+            return self.restart()
+        else:
+            print("  Daemon is stopped. Start to apply: umlaut start")
+            return 0
+    
+    def _is_running(self) -> bool:
+        """Check if daemon is currently running"""
+        try:
+            result = subprocess.run(['systemctl', '--user', 'is-active', self.SERVICE_NAME],
+                                  capture_output=True, text=True)
+            return result.stdout.strip() == 'active'
+        except Exception:
+            return False
+    
+    def config_disable(self, *config_names: str) -> int:
+        """Disable one or more configs"""
+        if not config_names:
+            print("ERROR: No config name specified")
+            return 1
+        
+        s = load_settings() if load_settings else {}
+        enabled = list(s.get('enabled_sequences', []))
+
+        newly_disabled = []
+        for config_name in config_names:
+            if config_name not in enabled:
+                print(f"Config '{config_name}' is not enabled")
+            else:
+                enabled.remove(config_name)
+                newly_disabled.append(config_name)
+
+        if not newly_disabled:
+            return 0
+
+        if save_settings:
+            s['enabled_sequences'] = enabled
+            save_settings(s)
+        else:
+            sp = Path.home() / '.config' / 'umlaut' / 'settings.config.json'
+            s['enabled_sequences'] = enabled
+            with open(sp, 'w') as f: json.dump(s, f, indent=2)
+
+        for config_name in newly_disabled:
+            print(f"✓ Disabled config: {config_name}")
+        
+        # Auto-restart if daemon is running
+        if self._is_running():
+            print("✓ Restarting daemon to apply changes...")
+            return self.restart()
+        else:
+            print("  Daemon is stopped. Start to apply: umlaut start")
+            return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Umlaut Control - Manage the keyboard remapping daemon',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  umlaut start                        Start the daemon
+  umlaut stop                         Stop the daemon
+  umlaut status                       Check daemon status
+  umlaut cl                           List all configs (config-list)
+  umlaut ce german math               Enable configs (config-enable)
+  umlaut cd german                    Disable config (config-disable)
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+    
+    # Daemon commands
+    subparsers.add_parser('start', help='Start the daemon')
+    subparsers.add_parser('stop', help='Stop the daemon')
+    subparsers.add_parser('restart', help='Restart the daemon')
+    subparsers.add_parser('reload', help='Reload configuration')
+    subparsers.add_parser('status', help='Show daemon status')
+    subparsers.add_parser('enable', help='Enable daemon autostart')
+    subparsers.add_parser('disable', help='Disable daemon autostart')
+    
+    validate_parser = subparsers.add_parser('validate', help='Validate config file')
+    validate_parser.add_argument('--config', '-c', help='Config file path')
+    
+    # Profile commands (flat structure with short aliases)
+    cl_parser = subparsers.add_parser('config-list', aliases=['cl'], help='List all configs')
+    
+    ce_parser = subparsers.add_parser('config-enable', aliases=['ce'], help='Enable one or more configs')
+    ce_parser.add_argument('config_names', nargs='+', metavar='CONFIG', help='Config name(s) to enable')
+    
+    cd_parser = subparsers.add_parser('config-disable', aliases=['cd'], help='Disable one or more configs')
+    cd_parser.add_argument('config_names', nargs='+', metavar='CONFIG', help='Config name(s) to disable')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 1
+    
+    control = UmlautControl()
+    
+    # Execute command
+    if args.command in ('config-list', 'cl'):
+        return control.config_list()
+    elif args.command in ('config-enable', 'ce'):
+        return control.config_enable(*args.config_names)
+    elif args.command in ('config-disable', 'cd'):
+        return control.config_disable(*args.config_names)
+    elif args.command == 'validate':
+        return control.validate_config(getattr(args, 'config', None))
+    else:
+        method = getattr(control, args.command)
+        result = method()
+        if isinstance(result, tuple):
+            retcode, errmsg = result
+            if retcode != 0 and errmsg:
+                print(f"ERROR: {errmsg}", file=sys.stderr)
+            return retcode
+        return result
+
+
+if __name__ == '__main__':
+    sys.exit(main())

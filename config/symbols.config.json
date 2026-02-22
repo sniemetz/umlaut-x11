@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Symbols",
+  "description": "Some symbols. Feel free to extend.",
+  "sequences": {
+    "KEY_SLASH": {
+      "e": "€",
+      "l": "￡",
+      "c": "￠"
+    },
+    "KEY_COMMA": {
+      "0": "°",
+      "i": "∞",
+      "p": "π",
+      "a": "α",
+      "b": "β",
+      "l": "λ",
+      "s": "Σ",
+      "r": "√",
+      "=": "≈",
+      "<": "≤",
+      ">": "≥"
+    }
+  }
+}
