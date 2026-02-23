@@ -2,7 +2,7 @@
 Type=Application
 Name=Umlaut Applet
 Comment=Umlaut system tray applet
-Exec=/usr/local/bin/umlaut_applet.py --delay 5
+Exec=/usr/local/bin/umlaut-scripts/umlaut_applet.py
 Icon=input-keyboard
 Hidden=false
 NoDisplay=false
