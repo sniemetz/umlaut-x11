@@ -5,6 +5,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/local/bin/umlaut-scripts/umlaut_daemon.py
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=no
