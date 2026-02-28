@@ -17,7 +17,7 @@ from umlaut_paths import (
     SYSTEM_ICON_DIR, USER_CONFIG_DIR,
     USER_ICON_DIR, USER_SETTINGS as SETTINGS_PATH,
     load_settings, save_settings,
-    APPLET_SCRIPT
+    APPLET_SCRIPT, TEST_MODE_FILE
 )
 
 # Paths imported from umlaut_paths
@@ -229,6 +229,281 @@ class KeyCaptureButton(Gtk.Button):
         self.set_label(placeholder)
 
 
+class SequenceTester:
+    """
+    In-process sequence state machine for the test drawer.
+    Mirrors daemon logic but operates on dirty seq_config + live settings.
+    No evdev, no uinput — returns human-readable result dicts.
+    """
+
+    # Key codes we track as modifiers (same set daemon uses)
+    _SHIFT_KEYS  = {42, 54}   # KEY_LEFTSHIFT, KEY_RIGHTSHIFT
+    _CTRL_KEYS   = {29, 97}   # KEY_LEFTCTRL, KEY_RIGHTCTRL
+    _META_KEYS   = {125, 126} # KEY_LEFTMETA, KEY_RIGHTMETA
+    _ALT_KEYS    = {56, 100}  # KEY_LEFTALT, KEY_RIGHTALT
+    _ALL_MODS    = _SHIFT_KEYS | _CTRL_KEYS | _META_KEYS | _ALT_KEYS
+
+    def __init__(self):
+        self._sequences   = {}        # parsed lookup table: tuple -> output_str
+        self._trigger_codes = set()   # int key codes
+        self._passthrough_codes = set()
+        self._valid_compose = set()   # compose key codes that have sequences
+        self._state       = 'IDLE'
+        self._trigger     = None
+        self._compose     = None
+        self._compose_shifted = False
+        self._pressed     = set()
+
+    # ── Setup ─────────────────────────────────────────────────────────────
+
+    def load(self, seq_config: dict, settings: dict):
+        """Parse dirty seq_config + settings into lookup table."""
+        import evdev.ecodes as ec
+
+        self._sequences.clear()
+        self._trigger_codes.clear()
+        self._passthrough_codes.clear()
+        self._valid_compose.clear()
+        self._reset_state()
+
+        # Trigger keys
+        trigger_defs = settings.get('trigger_key', ['KEY_LEFTALT', 'KEY_RIGHTALT'])
+        if isinstance(trigger_defs, str):
+            trigger_defs = [trigger_defs]
+        for tk in trigger_defs:
+            try:
+                self._trigger_codes.add(getattr(ec, tk))
+            except AttributeError:
+                pass
+
+        # Passthrough keys
+        for pk in settings.get('passthrough_keys', []):
+            try:
+                self._passthrough_codes.add(getattr(ec, pk))
+            except AttributeError:
+                pass
+
+        # Parse sequences: {compose_str: {target_str: output_str}}
+        sequences_raw = seq_config.get('sequences', {})
+        for compose_str, targets in sequences_raw.items():
+            if not isinstance(targets, dict):
+                continue
+            # Parse compose key (may be SHIFT+key)
+            compose_shifted = False
+            c_key = compose_str
+            if compose_str.upper().startswith('SHIFT+'):
+                compose_shifted = True
+                c_key = compose_str[6:]
+            try:
+                compose_code = self._parse_key(c_key)
+            except Exception:
+                continue
+
+            for target_str, output in targets.items():
+                if not isinstance(output, str):
+                    continue
+                try:
+                    target_codes = self._parse_target(target_str)
+                except Exception:
+                    continue
+                for trigger_code in self._trigger_codes:
+                    lookup = (trigger_code, compose_shifted, compose_code, *target_codes)
+                    self._sequences[lookup] = output
+                    self._valid_compose.add(compose_code)
+
+    def _parse_key(self, s: str) -> int:
+        import evdev.ecodes as ec
+        s = s.strip()
+        if s.upper().startswith('KEY_'):
+            return getattr(ec, s.upper())
+        # single char
+        c = s.lower()
+        name = f'KEY_{c.upper()}'
+        if hasattr(ec, name):
+            return getattr(ec, name)
+        # punctuation map (same as daemon)
+        pmap = {';': 'KEY_SEMICOLON', "'": 'KEY_APOSTROPHE', '`': 'KEY_GRAVE',
+                ',': 'KEY_COMMA', '.': 'KEY_DOT', '/': 'KEY_SLASH',
+                '\\': 'KEY_BACKSLASH', '-': 'KEY_MINUS', '=': 'KEY_EQUAL',
+                '[': 'KEY_LEFTBRACE', ']': 'KEY_RIGHTBRACE'}
+        if s in pmap:
+            return getattr(ec, pmap[s])
+        raise ValueError(f"Unknown key: {s!r}")
+
+    def _parse_target(self, s: str) -> list:
+        import evdev.ecodes as ec
+        s = s.strip()
+        # CTRL+x form
+        if '+' in s:
+            parts = s.split('+')
+            codes = []
+            for p in parts:
+                p = p.strip()
+                if p.upper() in ('CTRL', 'CONTROL'):
+                    codes.append(ec.KEY_LEFTCTRL)
+                elif p.upper() == 'SHIFT':
+                    codes.append(ec.KEY_LEFTSHIFT)
+                elif p.upper() == 'ALT':
+                    codes.append(ec.KEY_LEFTALT)
+                else:
+                    codes.append(self._parse_key(p))
+            return codes
+        # uppercase single char → add shift
+        if len(s) == 1 and s.isupper():
+            return [ec.KEY_LEFTSHIFT, self._parse_key(s)]
+        return [self._parse_key(s)]
+
+    # ── State machine ──────────────────────────────────────────────────────
+
+    def _reset_state(self):
+        self._state   = 'IDLE'
+        self._trigger = None
+        self._compose = None
+        self._compose_shifted = False
+
+    def feed_key(self, key_code: int, value: int) -> dict | None:
+        import evdev.ecodes as ec
+
+        if value == 1:
+            self._pressed.add(key_code)
+        elif value == 0:
+            self._pressed.discard(key_code)
+
+        # Repeats ignored during compose (same as daemon)
+        if value == 2 and self._state != 'IDLE':
+            return None
+
+        # ESC always cancels
+        if key_code == ec.KEY_ESC and value == 1:
+            if self._state != 'IDLE':
+                self._reset_state()
+                return None
+            return None
+
+        if self._state == 'IDLE':
+            if value != 1:
+                return None
+            if key_code in self._trigger_codes:
+                other_mods = self._CTRL_KEYS | self._META_KEYS
+                if self._pressed & other_mods - {key_code}:
+                    return {'status': 'passthrough', 'trigger': None, 'compose': None,
+                            'target': None, 'output': None,
+                            'reason': 'Trigger with Ctrl/Meta — regular shortcut'}
+                self._trigger = key_code
+                self._state   = 'TRIGGER_PRESSED'
+            return None
+
+        elif self._state == 'TRIGGER_PRESSED':
+            if value == 0 and key_code == self._trigger:
+                self._reset_state()
+                return {'status': 'passthrough', 'trigger': self._fmt(self._trigger),
+                        'compose': None, 'target': None, 'output': None,
+                        'reason': 'Trigger released alone'}
+            if value == 1:
+                if key_code in (self._SHIFT_KEYS):
+                    return None  # wait to see compose key
+                if key_code in self._passthrough_codes:
+                    res = {'status': 'passthrough',
+                           'trigger': self._fmt(self._trigger),
+                           'compose': self._fmt(key_code),
+                           'target': None, 'output': None,
+                           'reason': f'{self._fmt(key_code)} is in passthrough list'}
+                    self._reset_state()
+                    return res
+                if key_code in self._CTRL_KEYS | self._META_KEYS:
+                    self._reset_state()
+                    return {'status': 'passthrough', 'trigger': self._fmt(self._trigger),
+                            'compose': self._fmt(key_code), 'target': None, 'output': None,
+                            'reason': 'Additional modifier — regular shortcut'}
+                if key_code not in self._valid_compose:
+                    res = {'status': 'passthrough',
+                           'trigger': self._fmt(self._trigger),
+                           'compose': self._fmt(key_code),
+                           'target': None, 'output': None,
+                           'reason': f'{self._fmt(key_code)} has no sequences defined'}
+                    self._reset_state()
+                    return res
+                self._compose = key_code
+                self._compose_shifted = bool(self._pressed & self._SHIFT_KEYS)
+                self._state = 'COMPOSE_PRESSED'
+            return None
+
+        elif self._state == 'COMPOSE_PRESSED':
+            # Allow trigger key releases through — needed for transition to WAITING_TARGET
+            if key_code in self._ALL_MODS and key_code not in self._trigger_codes:
+                return None
+            if value == 0 and key_code in (self._trigger, self._compose):
+                t_gone = self._trigger not in self._pressed
+                c_gone = self._compose not in self._pressed
+                if t_gone and c_gone:
+                    self._state = 'WAITING_TARGET'
+                    return {'status': 'waiting',
+                            'trigger': self._fmt(self._trigger),
+                            'compose': ('Shift+' if self._compose_shifted else '') + self._fmt(self._compose),
+                            'target': None, 'output': None, 'reason': None}
+            return None
+
+        elif self._state == 'WAITING_TARGET':
+            if key_code in self._ALL_MODS:
+                return None
+            if value != 1:
+                return None
+
+            target_shifted = bool(self._pressed & self._SHIFT_KEYS)
+            target_codes   = []
+            if target_shifted:
+                import evdev.ecodes as ec2
+                target_codes.append(ec2.KEY_LEFTSHIFT)
+            target_codes.append(key_code)
+
+            lookup = (self._trigger, self._compose_shifted, self._compose, *target_codes)
+
+            matched_output = self._sequences.get(lookup)
+            if matched_output is None and target_shifted:
+                # Try unshifted fallback
+                import evdev.ecodes as ec2
+                ul = (self._trigger, self._compose_shifted, self._compose, key_code)
+                matched_output = self._sequences.get(ul)
+
+            trigger_disp = self._fmt(self._trigger)
+            compose_disp = ('Shift+' if self._compose_shifted else '') + self._fmt(self._compose)
+            target_disp  = ('Shift+' if target_shifted else '') + self._fmt(key_code)
+
+            self._reset_state()
+
+            if matched_output is not None:
+                return {'status': 'matched', 'trigger': trigger_disp,
+                        'compose': compose_disp, 'target': target_disp,
+                        'output': matched_output, 'reason': None}
+            else:
+                return {'status': 'no_match', 'trigger': trigger_disp,
+                        'compose': compose_disp, 'target': target_disp,
+                        'output': None, 'reason': 'No sequence matched — passed through'}
+
+        return None
+
+    def _fmt(self, code: int) -> str:
+        """Format a key code as a human-readable string."""
+        if code is None:
+            return '—'
+        try:
+            import evdev.ecodes as ec
+            name = ec.KEY.get(code, f'KEY_{code}')
+            # Strip KEY_ prefix and title-case
+            if name.startswith('KEY_'):
+                return name[4:].title()
+            return name
+        except Exception:
+            return str(code)
+
+    def in_waiting_state(self) -> bool:
+        return self._state == 'WAITING_TARGET'
+
+    def reset(self):
+        self._reset_state()
+        self._pressed.clear()
+
+
 class SequenceEditorDialog(Gtk.Window):
 
     def __init__(self, parent, sequence_config_path, on_saved=None):
@@ -239,6 +514,7 @@ class SequenceEditorDialog(Gtk.Window):
         self._saved_callback = on_saved or (lambda: None)
         self.connect('delete-event', self._on_delete_event)
         self.connect('key-press-event', self._on_key_press)
+        self.connect('destroy', lambda _: TEST_MODE_FILE.unlink(missing_ok=True))
 
         self.seq_path   = Path(sequence_config_path) if sequence_config_path else None
         self.seq_config = self._load_json(self.seq_path, {"sequences": {}}) if self.seq_path else {"sequences": {}}
@@ -260,7 +536,78 @@ class SequenceEditorDialog(Gtk.Window):
         self.btn_save.connect('clicked', self._on_save_clicked)
         btn_row.pack_end(self.btn_save, False, False, 0)
         btn_row.pack_end(btn_cancel, False, False, 0)
+
+        self.btn_test = Gtk.ToggleButton(label="▶ Test")
+        self.btn_test.connect('toggled', self._on_test_toggled)
+        btn_row.pack_start(self.btn_test, False, False, 0)
+
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # ── Test drawer (hidden until Test button toggled) ─────────────────
+        self._tester      = SequenceTester()
+        self._test_active = False
+
+        self._test_revealer = Gtk.Revealer()
+        self._test_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._test_revealer.set_transition_duration(200)
+
+        test_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        test_box.set_border_width(10)
+
+        test_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        title_lbl = Gtk.Label(xalign=0)
+        title_lbl.set_markup('<b>Test sequences</b>  <small>(type a sequence — results appear below)</small>')
+        test_box.pack_start(title_lbl, False, False, 0)
+
+        capture_lbl = Gtk.Label(xalign=0)
+        capture_lbl.set_markup('<small>🔒 Keyboard captured while test is active — Alt-Tab, Ctrl-V etc. will not work</small>')
+        capture_lbl.get_style_context().add_class('dim-label')
+        test_box.pack_start(capture_lbl, False, False, 0)
+
+        # Result grid
+        result_grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+
+        def _ro_entry():
+            e = Gtk.Entry()
+            e.set_editable(False)
+            e.set_can_focus(False)
+            e.set_width_chars(14)
+            return e
+
+        result_grid.attach(Gtk.Label(label="Trigger:", xalign=1),  0, 0, 1, 1)
+        self._t_trigger = _ro_entry()
+        result_grid.attach(self._t_trigger, 1, 0, 1, 1)
+
+        result_grid.attach(Gtk.Label(label="Compose:", xalign=1), 0, 1, 1, 1)
+        self._t_compose = _ro_entry()
+        result_grid.attach(self._t_compose, 1, 1, 1, 1)
+
+        result_grid.attach(Gtk.Label(label="Target:", xalign=1),  0, 2, 1, 1)
+        self._t_target  = _ro_entry()
+        result_grid.attach(self._t_target,  1, 2, 1, 1)
+
+        result_grid.attach(Gtk.Label(label="Output:", xalign=1),  0, 3, 1, 1)
+        self._t_output  = _ro_entry()
+        self._t_output.set_width_chars(24)
+        result_grid.attach(self._t_output,  1, 3, 1, 1)
+
+        test_box.pack_start(result_grid, False, False, 0)
+
+        self._t_status = Gtk.Label(label="", xalign=0)
+        self._t_status.set_line_wrap(True)
+        sc = self._t_status.get_style_context()
+        sc.add_class('dim-label')
+        test_box.pack_start(self._t_status, False, False, 0)
+
+        btn_clear_test = Gtk.Button(label="Clear")
+        btn_clear_test.set_halign(Gtk.Align.START)
+        btn_clear_test.connect('clicked', lambda _: self._test_clear())
+        test_box.pack_start(btn_clear_test, False, False, 0)
+
+        self._test_revealer.add(test_box)
+        outer.pack_start(self._test_revealer, False, False, 0)
+
         outer.pack_start(btn_row, False, False, 0)
 
         # ── Name & Description ────────────────────────────────────────────
@@ -371,17 +718,155 @@ class SequenceEditorDialog(Gtk.Window):
             return default
 
     def _on_key_press(self, widget, event):
+        # ESC is always handled first — closes dialog or stops test
         if event.keyval == Gdk.KEY_Escape and not self._any_capture_active():
-            self.destroy()
+            if self._test_active:
+                self._stop_test()
+            else:
+                self.destroy()
+            return True
+        # Route to tester when drawer is open (and no capture dialog is active)
+        if self._test_active and not self._any_capture_active():
+            hw = event.hardware_keycode
+            import evdev.ecodes as ec
+            # hardware_keycode in GTK is evdev code + 8
+            evdev_code = hw - 8
+            result = self._tester.feed_key(evdev_code, 1)
+            if result:
+                self._test_show(result)
+            elif self._tester.in_waiting_state():
+                GLib.timeout_add(self._test_timeout_ms, self._test_timeout_reset)
+            return True   # swallow — don't let GTK process it further
+        return False
+
+    def _test_timeout_reset(self):
+        """Called by GLib timer — reset tester if still waiting for target."""
+        if self._test_active and self._tester.in_waiting_state():
+            self._tester.reset()
+            self._t_status.set_text("⏱ Timed out — sequence cancelled")
+        return False  # don't repeat
+
+    def _on_key_release(self, widget, event):
+        if self._test_active and not self._any_capture_active():
+            evdev_code = event.hardware_keycode - 8
+            result = self._tester.feed_key(evdev_code, 0)
+            if result:
+                self._test_show(result)
             return True
         return False
 
     def _on_delete_event(self, widget, event):
         """Block close while a key capture is in progress."""
+        if self._test_active:
+            self._stop_test()
         return self._any_capture_active()
 
     def _any_capture_active(self):
         return _any_capture_active([self.btn_compose, self.btn_target])
+
+    # ── Test drawer ───────────────────────────────────────────────────────
+
+    def _on_test_toggled(self, btn):
+        if btn.get_active():
+            self._start_test()
+        else:
+            self._stop_test()
+
+    def _start_test(self):
+        # Load dirty state into tester
+        settings = self._load_json(SETTINGS_PATH, {})
+        self._tester.load(self.seq_config, settings)
+        self._tester.reset()
+        self._test_timeout_ms = settings.get('settings', {}).get('timeout_ms', 1000)
+        self._test_active = True
+        # Write flag file so daemon passes through
+        try:
+            TEST_MODE_FILE.touch()
+        except Exception:
+            pass
+        # Freeze editor controls
+        self._set_editor_sensitive(False)
+        # Connect key-release
+        self._key_release_handler = self.connect('key-release-event', self._on_key_release)
+        self._test_revealer.set_reveal_child(True)
+        self._test_clear()
+        self._t_status.set_text("🔒 Keyboard captured — type a sequence")
+        # Hard X11 keyboard grab so this window receives all key events
+        self.present()
+        gdkwin = self.get_window()
+        if gdkwin:
+            result = Gdk.keyboard_grab(gdkwin, True, Gdk.CURRENT_TIME)
+            if result != Gdk.GrabStatus.SUCCESS:
+                self._t_status.set_text("⚠ Could not grab keyboard — click here first, then type")
+
+    def _stop_test(self):
+        self._test_active = False
+        # Release X11 keyboard grab
+        Gdk.keyboard_ungrab(Gdk.CURRENT_TIME)
+        # Remove flag file
+        try:
+            TEST_MODE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Disconnect key-release
+        if hasattr(self, '_key_release_handler'):
+            try:
+                self.disconnect(self._key_release_handler)
+            except Exception:
+                pass
+        self._tester.reset()
+        self._set_editor_sensitive(True)
+        self._test_revealer.set_reveal_child(False)
+        if self.btn_test.get_active():
+            self.btn_test.set_active(False)
+
+    def _set_editor_sensitive(self, sensitive: bool):
+        for w in (self.btn_compose, self.btn_target, self.output_entry,
+                  self.btn_add, self.btn_delete, self.btn_save,
+                  self.name_entry, self.desc_entry):
+            w.set_sensitive(sensitive)
+
+    def _test_clear(self):
+        self._tester.reset()
+        for w in (self._t_trigger, self._t_compose, self._t_target, self._t_output):
+            w.set_text('')
+        self._t_status.set_text("🔒 Keyboard captured — type a sequence")
+        # Remove any coloring
+        for w in (self._t_trigger, self._t_compose, self._t_target, self._t_output):
+            w.get_style_context().remove_class('test-matched')
+            w.get_style_context().remove_class('test-nomatch')
+
+    def _test_show(self, result: dict):
+        self._t_trigger.set_text(result.get('trigger') or '')
+        self._t_compose.set_text(result.get('compose') or '')
+        self._t_target.set_text( result.get('target')  or '')
+        self._t_output.set_text( result.get('output')  or '')
+
+        status = result.get('status')
+        reason = result.get('reason') or ''
+
+        css_matched  = 'test-matched'
+        css_nomatch  = 'test-nomatch'
+
+        for w in (self._t_trigger, self._t_compose, self._t_target, self._t_output):
+            sc = w.get_style_context()
+            sc.remove_class(css_matched)
+            sc.remove_class(css_nomatch)
+
+        if status == 'waiting':
+            self._t_status.set_text("⌨ Waiting for target key…")
+        elif status == 'matched':
+            for w in (self._t_output,):
+                w.get_style_context().add_class(css_matched)
+            self._t_status.set_text(f"✓ Matched → {result.get('output')}")
+        elif status == 'no_match':
+            for w in (self._t_target,):
+                w.get_style_context().add_class(css_nomatch)
+            self._t_status.set_text(f"↷ Passed through — {reason}")
+        elif status == 'passthrough':
+            self._t_status.set_text(f"↷ Passed through — {reason}")
+        elif status == 'ignored':
+            self._t_status.set_text(f"✗ Ignored — {reason}")
 
     # ── Sequences ─────────────────────────────────────────────────────────
 
@@ -1242,6 +1727,19 @@ class ConfigManager(Gtk.Window):
 
 
 def main():
+    # Inject CSS for test drawer result highlighting
+    css = b"""
+    entry.test-matched { background-color: #d4edda; color: #155724; }
+    entry.test-nomatch  { background-color: #f8d7da; color: #721c24; }
+    """
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(),
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
     win = ConfigManager()
     win.connect("destroy", Gtk.main_quit)
     win.show_all()

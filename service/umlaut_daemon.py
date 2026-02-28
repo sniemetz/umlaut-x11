@@ -24,9 +24,10 @@ from evdev import UInput, ecodes as e
 # Import shared path helpers (umlaut_paths.py installed alongside this script)
 sys.path.insert(0, str(Path(__file__).parent))
 try:
-    from umlaut_paths import load_sequence_config
+    from umlaut_paths import load_sequence_config, TEST_MODE_FILE
 except ImportError:
     load_sequence_config = None  # graceful degradation if not installed yet
+    TEST_MODE_FILE = Path('/tmp/umlaut_test_mode')
 
 # Logging will be configured in main() based on args
 logger = logging.getLogger('umlaut')
@@ -836,6 +837,13 @@ class UmlautDaemon:
     
     def handle_event(self, event):
         """Process a keyboard event"""
+        # Test mode: pass everything through untouched so the GUI tester can process it
+        if TEST_MODE_FILE.exists():
+            self.uinput.write(event.type, event.code, event.value)
+            if event.type == e.EV_SYN:
+                pass  # syn already written
+            return
+
         if event.type != e.EV_KEY:
             # Pass through non-key events
             self.uinput.write(event.type, event.code, event.value)
@@ -1175,7 +1183,13 @@ class UmlautDaemon:
     def run(self):
         """Main event loop"""
         self.running = True
-        
+
+        # Clean up stale test mode flag from a previous crashed session
+        try:
+            TEST_MODE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         logger.info("Umlaut daemon starting...")
         
         # Find and grab devices

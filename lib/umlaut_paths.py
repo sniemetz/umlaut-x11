@@ -17,6 +17,9 @@ UMLAUT_CTL        = Path('/usr/local/bin/umlaut')
 # ── Icon paths ────────────────────────────────────────────────────────────
 SYSTEM_ICON_DIR   = Path('/usr/share/pixmaps/umlaut')
 
+# ── Runtime flags ────────────────────────────────────────────────────────
+TEST_MODE_FILE    = Path('/tmp/umlaut_test_mode')
+
 # ── User paths ────────────────────────────────────────────────────────────
 USER_CONFIG_DIR   = Path.home() / '.config' / 'umlaut'
 USER_ICON_DIR     = USER_CONFIG_DIR / 'icons'
