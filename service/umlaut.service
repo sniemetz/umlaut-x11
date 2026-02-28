@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sleep 5
+ExecStartPre=/bin/sleep 2
 ExecStart=/usr/local/bin/umlaut-scripts/umlaut_daemon.py
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

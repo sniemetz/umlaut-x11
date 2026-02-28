@@ -713,12 +713,12 @@ class UmlautDaemon:
             if char.isupper():
                 subprocess.run(['xdotool', 'keydown', 'shift'],
                                check=True, capture_output=True, timeout=1, env=env)
-                subprocess.run(['xdotool', 'type', '--', char],
+                subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '20', '--', char],
                                check=True, capture_output=True, timeout=1, env=env)
                 subprocess.run(['xdotool', 'keyup', 'shift'],
                                check=True, capture_output=True, timeout=1, env=env)
             else:
-                subprocess.run(['xdotool', 'type', '--', char],
+                subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '20', '--', char],
                                check=True, capture_output=True, timeout=1, env=env)
             logger.debug(f"xdotool success: {char!r}")
         except subprocess.TimeoutExpired:
@@ -782,7 +782,8 @@ class UmlautDaemon:
         self.compose_shifted = False
         self.compose_start_time = 0
         self.trigger_start_time = 0
-    
+        self.pressed_keys.clear()  # apps like LibreOffice swallow key-up events, leaving stale state
+
     def force_release_all(self):
         """Force release all modifier and compose keys - emergency unstick"""
         logger.debug("Force releasing all compose keys")
