@@ -807,12 +807,13 @@ class UmlautDaemon:
 
         if self.state == 'TRIGGER_PRESSED':
             if now - self.trigger_start_time >= self.timeout_sec:
-                logger.debug("Modifier timeout - passing through")
+                logger.debug("Modifier timeout - passing through (key still held)")
+                # Emit keydown only — key is still physically held.
+                # Switch to PASSTHROUGH_HELD so subsequent keys pass through
+                # until the trigger is physically released.
                 self.uinput.write(e.EV_KEY, self.current_trigger, 1)
                 self.uinput.syn()
-                self.uinput.write(e.EV_KEY, self.current_trigger, 0)
-                self.uinput.syn()
-                self.cancel_compose()
+                self.state = 'PASSTHROUGH_HELD'
 
         elif self.state == 'WAITING_TARGET':
             if now - self.compose_start_time >= self.timeout_sec:
@@ -858,17 +859,17 @@ class UmlautDaemon:
         elif value == 0:  # Key release
             self.pressed_keys.discard(key_code)
         
-        # Ignore key repeat events during compose
-        if value == 2 and self.state != 'IDLE':
+        # Ignore key repeat events during compose (but allow in PASSTHROUGH_HELD)
+        if value == 2 and self.state not in ('IDLE', 'PASSTHROUGH_HELD'):
             return
-        
-        # ESC always cancels and force-releases everything
+
+        # ESC always cancels and force-releases everything (except in PASSTHROUGH_HELD)
         if key_code == e.KEY_ESC and value == 1:
-            if self.state != 'IDLE':
+            if self.state not in ('IDLE', 'PASSTHROUGH_HELD'):
                 logger.debug("ESC pressed - force cancelling compose")
                 self.force_release_all()
                 return  # Don't pass through ESC if we cancelled
-        
+
         # State machine
         if self.state == 'IDLE':
             # Check if this is a modifier key press
@@ -957,7 +958,16 @@ class UmlautDaemon:
                 self.state = 'COMPOSE_PRESSED'
                 logger.debug(f"Compose key pressed: {key_code} (shifted={self.compose_shifted})")
                 return  # Don't pass through yet
-            
+
+        elif self.state == 'PASSTHROUGH_HELD':
+            # Trigger timed out but is still physically held — pass everything through.
+            # On trigger release, return to IDLE.
+            if value == 0 and key_code == self.current_trigger:
+                self.cancel_compose()  # resets to IDLE
+            self.uinput.write(e.EV_KEY, key_code, value)
+            self.uinput.syn()
+            return
+
         elif self.state == 'COMPOSE_PRESSED':
             # Ignore modifier key presses/releases (user might hold shift through the sequence)
             if key_code in (e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT, 
