@@ -694,11 +694,7 @@ class UmlautDaemon:
                 self.emit_unicode_char(char)
     
     def emit_unicode_char(self, char: str):
-        """Emit a Unicode character using xdotool
-        
-        This works on X11 systems with xdotool installed.
-        For uppercase characters, holds shift before typing.
-        """
+        """Emit a Unicode character using xdotool."""
         # Security: Validate char is a single character
         if len(char) != 1:
             logger.error(f"emit_unicode_char requires single character, got: {repr(char)}")
@@ -709,18 +705,26 @@ class UmlautDaemon:
             return
 
         env = os.environ.copy()
-        logger.debug(f"xdotool type: {char!r}")
+        # Build the X11 keysym hex value directly from the Unicode codepoint.
+        # Using 'xdotool key' (not 'type') so xdotool sends the keysym directly
+        # rather than looking up a keyboard-layout shortcut. No --clearmodifiers:
+        # the daemon already intercepted Alt and never forwarded it to X11, so
+        # there are no stray modifiers to clear, and omitting the flag lets
+        # xdotool apply the Shift it needs internally (e.g. Ö = Shift+ö_key).
+        # Latin-1 keysyms (U+0000–U+00FF) equal the codepoint; higher planes
+        # need the 0x01000000 ISO 10646 prefix.
+        cp = ord(char)
+        # Always use the ISO 10646 Unicode keysym form (0x01000000 + codepoint).
+        # Using the plain Latin-1 keysym (e.g. 0x00D6 for Ö) triggers X11's
+        # automatic case-pairing: the server normalises it to [odiaeresis,
+        # Odiaeresis], so pressing without Shift produces ö instead of Ö.
+        # The 0x01000000 form is treated as a raw Unicode codepoint with no
+        # case normalisation.
+        keysym = f"0x{0x01000000 + cp:08X}"
+        logger.debug(f"xdotool key: {char!r} → {keysym}")
         try:
-            if char.isupper():
-                subprocess.run(['xdotool', 'keydown', 'shift'],
-                               check=True, capture_output=True, timeout=1, env=env)
-                subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '20', '--', char],
-                               check=True, capture_output=True, timeout=1, env=env)
-                subprocess.run(['xdotool', 'keyup', 'shift'],
-                               check=True, capture_output=True, timeout=1, env=env)
-            else:
-                subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '20', '--', char],
-                               check=True, capture_output=True, timeout=1, env=env)
+            subprocess.run(['xdotool', 'key', keysym],
+                           check=True, capture_output=True, timeout=1, env=env)
             logger.debug(f"xdotool success: {char!r}")
         except subprocess.TimeoutExpired:
             logger.error(f"xdotool timeout typing: {char!r}")
@@ -729,8 +733,6 @@ class UmlautDaemon:
         except FileNotFoundError:
             logger.warning("xdotool not found — disabling Unicode output")
             self.xdotool_available = False
-        self._inotify_fd = None   # inotify fd for USB hotplug detection
-        self._inotify_wd = None
     
     def emit_output(self, output: OutputAction, target_was_shifted: bool = False):
         """Emit output based on action type
@@ -740,7 +742,7 @@ class UmlautDaemon:
             target_was_shifted: True if the user pressed Shift+key for the target
         """
         logger.debug(f"emit_output: type={output.action_type}, shifted={target_was_shifted}, data={output.data}")
-        
+
         if output.action_type == 'string':
             # Apply uppercase if target was shifted
             text = output.data
@@ -904,7 +906,22 @@ class UmlautDaemon:
                 self.uinput.syn()
                 self.cancel_compose()
                 return
-            
+
+            # Second trigger press while waiting for compose (rapid double-tap under load)
+            # Pass through the first trigger and restart fresh
+            if value == 1 and key_code == self.current_trigger:
+                logger.debug("Double trigger press — passing through first, restarting")
+                self.uinput.write(e.EV_KEY, self.current_trigger, 1)
+                self.uinput.syn()
+                self.uinput.write(e.EV_KEY, self.current_trigger, 0)
+                self.uinput.syn()
+                self.cancel_compose()
+                # Re-enter TRIGGER_PRESSED for the new press
+                self.current_trigger = key_code
+                self.state = 'TRIGGER_PRESSED'
+                self.trigger_start_time = time.time()
+                return
+
             # Check if another modifier key is pressed (e.g., Alt then Ctrl)
             # BUT: Don't abort if Shift+NextKey could be a valid compose sequence
             if value == 1 and key_code in (e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL,
@@ -970,7 +987,7 @@ class UmlautDaemon:
 
         elif self.state == 'COMPOSE_PRESSED':
             # Ignore modifier key presses/releases (user might hold shift through the sequence)
-            if key_code in (e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT, 
+            if key_code in (e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT,
                            e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL,
                            e.KEY_LEFTALT, e.KEY_RIGHTALT,
                            e.KEY_LEFTMETA, e.KEY_RIGHTMETA):
@@ -978,7 +995,11 @@ class UmlautDaemon:
                 if value == 0 and key_code in (e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT):
                     self.uinput.write(e.EV_KEY, key_code, 0)
                     self.uinput.syn()
-            
+                # Let trigger/compose releases fall through to the state-transition check
+                # below; swallow everything else so Shift presses don't leak to X11
+                if key_code not in (self.current_trigger, self.current_compose):
+                    return
+
             # Waiting for modifier and compose to be released
             if value == 0:
                 if key_code == self.current_trigger or key_code == self.current_compose:

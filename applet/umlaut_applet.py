@@ -65,7 +65,9 @@ class UmlautApplet:
         # On SIGTERM (external kill): quit cleanly but don't kill children —
         # config manager may have been opened intentionally and should survive.
         # Children are only killed on explicit Quit from the menu.
-        signal.signal(signal.SIGTERM, lambda *_: GLib.idle_add(Gtk.main_quit))
+        # GLib.unix_signal_add integrates with the GLib event loop directly, so
+        # SIGTERM is delivered even when the loop is blocked in C extensions.
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, Gtk.main_quit)
 
         # Build menu
         self.menu = Gtk.Menu()
