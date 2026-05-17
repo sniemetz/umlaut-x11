@@ -659,38 +659,56 @@ class UmlautDaemon:
                 self.uinput.syn()
     
     def emit_string(self, text: str):
-        """Type a string of characters, handling shift for uppercase and Unicode"""
+        """Type a string of characters, handling shift for uppercase and Unicode."""
+        # If the string contains any non-ASCII character, hand the ENTIRE string
+        # to xdotool type in one call. Mixing uinput (ASCII) and xdotool
+        # (non-ASCII) in a single string causes ordering and swallowing bugs
+        # because they feed different X11 event queues. A single xdotool call
+        # keeps everything on one queue.
+        # Note: no --clearmodifiers — the daemon already intercepted Alt/Shift
+        # before this point and never forwarded them to X11.
+        if len(text) > 1 and any(ord(c) > 127 for c in text):
+            if not self.xdotool_available:
+                logger.warning("xdotool unavailable — cannot type string with non-ASCII")
+                return
+            env = os.environ.copy()
+            try:
+                subprocess.run(
+                    ['xdotool', 'type', '--delay', '20', '--', text],
+                    check=True, capture_output=True, timeout=10, env=env
+                )
+            except subprocess.TimeoutExpired:
+                logger.error("xdotool timeout typing string")
+            except subprocess.CalledProcessError as ex:
+                logger.error(f"xdotool failed typing string: {ex.stderr}")
+            except FileNotFoundError:
+                logger.warning("xdotool not found — disabling Unicode output")
+                self.xdotool_available = False
+            return
+
+        # Pure ASCII or single char: per-character emission via uinput (fast)
+        # or xdotool key for single non-ASCII chars (e.g. ü from a sequence).
         for char in text:
-            # Check if character is ASCII and in our character map
             if ord(char) <= 127 and (char in self.config.CHAR_TO_KEY or char in self.config.SHIFTED_CHARS):
-                # Use direct key emission for ASCII characters
                 needs_shift = False
                 base_char = char
-                
                 if char in self.config.SHIFTED_CHARS:
                     base_char, needs_shift = self.config.SHIFTED_CHARS[char]
-                
-                # Get key code
                 if base_char in self.config.CHAR_TO_KEY:
                     key_code = self.config.CHAR_TO_KEY[base_char]
-                    
                     if needs_shift:
                         self.uinput.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
                         self.uinput.syn()
-                    
-                    # Press and release key
                     self.uinput.write(e.EV_KEY, key_code, 1)
                     self.uinput.syn()
                     self.uinput.write(e.EV_KEY, key_code, 0)
                     self.uinput.syn()
-                    
                     if needs_shift:
                         self.uinput.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
                         self.uinput.syn()
                 else:
                     logger.warning(f"Cannot type character: {char}")
             else:
-                # Unicode character - use Ctrl+Shift+U method
                 self.emit_unicode_char(char)
     
     def emit_unicode_char(self, char: str):
