@@ -58,6 +58,19 @@ umlaut/
 | `~/.config/systemd/user/umlaut.service` | User systemd service |
 | `~/.config/autostart/umlaut-applet.desktop` | Applet autostart entry |
 
+## Permissions
+
+The daemon needs read access to `/dev/input/event*` (evdev grab) and write access to `/dev/uinput` (virtual keyboard output).
+
+`install.sh` handles both automatically:
+
+| Action | What install.sh does |
+|---|---|
+| Add user to `input` group | `usermod -a -G input $USER` |
+| Grant group access to devices | `/etc/udev/rules.d/99-umlaut.rules` — `MODE="0660", GROUP="input"` for both `event*` and `uinput` |
+
+**Log-out required** after first install — Linux only applies new group membership at login time. The installer prints a loud warning when this applies.
+
 ## Config System
 
 ### Load order (daemon startup)

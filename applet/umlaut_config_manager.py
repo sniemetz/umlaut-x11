@@ -1109,6 +1109,34 @@ class ConfigManager(Gtk.Window):
             GLib.timeout_add_seconds(3, lambda: self.get_realized() and
                                      (self.status_label.set_text('') or False))
 
+    def _restart_daemon_async(self, success_msg="✓ Daemon restarted"):
+        """Start daemon restart in background thread. Updates status bar on completion."""
+        self._set_status("⟳ Restarting daemon…", transient=False)
+
+        def _do_restart():
+            try:
+                result = subprocess.run(
+                    ['systemctl', '--user', 'restart', 'umlaut'],
+                    capture_output=True, text=True, timeout=10
+                )
+                def _on_done():
+                    if result.returncode == 0:
+                        self._set_status(success_msg, transient=True)
+                    else:
+                        self._set_status("✗ Daemon restart failed", transient=False)
+                        self._error(f"Daemon restart failed:\n{result.stderr.strip()}")
+                    return False
+                GLib.idle_add(_on_done)
+            except Exception as ex:
+                GLib.idle_add(lambda: (
+                    self._set_status("✗ Daemon restart failed", transient=False),
+                    self._error(f"Failed to restart daemon: {ex}"),
+                    False
+                )[-1])
+
+        import threading
+        threading.Thread(target=_do_restart, daemon=True).start()
+
     def _snapshot(self, from_disk=False):
         """Snapshot settings for dirty-checking.
         source='disk' reads saved state; source='ui' reads current widget state.
@@ -1544,13 +1572,7 @@ class ConfigManager(Gtk.Window):
                 ]
                 self._save_enabled()
             self._refresh_list()
-            result = subprocess.run(['systemctl', '--user', 'restart', 'umlaut'],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                self._set_status("✓ Config saved — daemon restarted")
-            else:
-                self._set_status("✓ Config saved")
-                self._error(f"Daemon restart failed:\n{result.stderr.strip()}")
+            self._restart_daemon_async("✓ Config saved — daemon restarted")
         dlg = SequenceEditorDialog(self, path, on_saved=_on_saved)
         dlg.show_all()
 
@@ -1608,12 +1630,7 @@ class ConfigManager(Gtk.Window):
             self._save_enabled()
             self._refresh_list()
             if was_enabled:
-                result = subprocess.run(['systemctl', '--user', 'restart', 'umlaut'],
-                                        capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    self._set_status("✓ Deleted — daemon restarted")
-                else:
-                    self._error(f"Daemon restart failed:\n{result.stderr.strip()}")
+                self._restart_daemon_async("✓ Deleted — daemon restarted")
         except Exception as e:
             self._error(f"Failed to delete: {e}")
 
@@ -1648,30 +1665,44 @@ class ConfigManager(Gtk.Window):
             self._error(f"Failed to save settings: {e}")
             return
 
-        try:
-            result = subprocess.run(['systemctl', '--user', 'restart', 'umlaut'],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                self._error(f"Daemon restart failed: {result.stderr}")
-                return
-        except Exception as e:
-            self._error(f"Failed to restart daemon: {e}")
-            return
+        # Restart daemon async, then restart applet on success
+        self._set_status("⟳ Restarting daemon…", transient=False)
 
-        # Restart applet to pick up new icon/settings
-        try:
-            result = subprocess.run(['pgrep', '-f', 'umlaut_applet'],
-                                    capture_output=True, text=True)
-            my_pid = os.getpid()
-            for pid_str in result.stdout.strip().splitlines():
-                pid = int(pid_str)
-                if pid != my_pid:
-                    os.kill(pid, signal.SIGTERM)
-            GLib.timeout_add(800, lambda: subprocess.Popen([str(APPLET_SCRIPT)]) and False)
-        except Exception as e:
-            logger.warning(f"Applet restart failed: {e}")
+        def _do_restart():
+            try:
+                result = subprocess.run(
+                    ['systemctl', '--user', 'restart', 'umlaut'],
+                    capture_output=True, text=True, timeout=10
+                )
+                def _on_done():
+                    if result.returncode != 0:
+                        self._set_status("✗ Daemon restart failed", transient=False)
+                        self._error(f"Daemon restart failed: {result.stderr.strip()}")
+                        return False
+                    # Restart applet to pick up new icon/settings
+                    try:
+                        pgrep = subprocess.run(['pgrep', '-f', 'umlaut_applet'],
+                                               capture_output=True, text=True)
+                        my_pid = os.getpid()
+                        for pid_str in pgrep.stdout.strip().splitlines():
+                            pid = int(pid_str)
+                            if pid != my_pid:
+                                os.kill(pid, signal.SIGTERM)
+                        GLib.timeout_add(800, lambda: subprocess.Popen([str(APPLET_SCRIPT)]) and False)
+                    except Exception as e:
+                        logger.warning(f"Applet restart failed: {e}")
+                    self._set_status("✓ Changes applied — applet restarting", transient=True)
+                    return False
+                GLib.idle_add(_on_done)
+            except Exception as ex:
+                GLib.idle_add(lambda: (
+                    self._set_status("✗ Daemon restart failed", transient=False),
+                    self._error(f"Failed to restart daemon: {ex}"),
+                    False
+                )[-1])
 
-        self._set_status("✓ Changes applied — applet restarting")
+        import threading
+        threading.Thread(target=_do_restart, daemon=True).start()
 
     def _validate_config(self, path):
         """Validate a single config file. Returns error string or None."""
